@@ -1,4 +1,7 @@
+# prueba claude haiku 4.5
+
 import boto3
+
 
 session = boto3.Session(profile_name="practica-bedrock")
 
