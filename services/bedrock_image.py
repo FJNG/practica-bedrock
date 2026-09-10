@@ -44,8 +44,26 @@ def generate_image(
         body=json.dumps(request_body)
     )
 
-    response_body = json.loads(response["body"].read())
+    response_body = json.loads(
+        response["body"].read().decode("utf-8")
+    )
 
-    image_base64 = response_body["images"][0]
+    finish_reasons = response_body.get("finish_reasons", [])
+
+    if finish_reasons and finish_reasons[0] is not None:
+        raise RuntimeError(
+            f"La generación de imagen no se completó: "
+            f"{finish_reasons[0]}"
+        )
+
+    images = response_body.get("images")
+
+    if not images:
+        raise RuntimeError(
+            f"Bedrock no devolvió ninguna imagen. "
+            f"Respuesta: {response_body}"
+        )
+
+    image_base64 = images[0]
 
     return base64.b64decode(image_base64)
