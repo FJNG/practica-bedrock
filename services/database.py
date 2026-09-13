@@ -1,16 +1,18 @@
 import sqlite3
 from pathlib import Path
+import json
 
 
 DB_PATH = Path("data/app.db")
 
 
+import sqlite3
+
+
 def get_connection():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
-
     return connection
 
 
@@ -130,6 +132,32 @@ def initialize_database():
             FOREIGN KEY (content_id) REFERENCES image_contents(id),
             FOREIGN KEY (version_id) REFERENCES image_versions(id),
             FOREIGN KEY (user_id) REFERENCES users(id)
+        )
+    """)
+
+
+    # Tablas para contenido y chunks de RAG
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_documents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL
+    )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_id INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            embedding TEXT,
+            FOREIGN KEY (document_id)
+                REFERENCES knowledge_documents(id)
+                ON DELETE CASCADE
         )
     """)
 
@@ -760,3 +788,203 @@ def delete_image_version_by_filename(filename: str):
 
     connection.commit()
     connection.close()
+
+
+# ============================================================
+# KNOWLEDGE / RAG
+# ============================================================
+
+def create_knowledge_document(
+    project_id: int,
+    title: str,
+    content: str,
+    content_hash: str,
+    created_at: str
+) -> int:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO knowledge_documents (
+            project_id,
+            title,
+            content,
+            content_hash,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            project_id,
+            title,
+            content,
+            content_hash,
+            created_at
+        )
+    )
+
+    document_id = cursor.lastrowid
+
+    connection.commit()
+    connection.close()
+
+    return document_id
+
+
+def get_knowledge_document(
+    project_id: int,
+    title: str
+) -> dict | None:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            id,
+            project_id,
+            title,
+            content,
+            content_hash,
+            created_at
+        FROM knowledge_documents
+        WHERE project_id = ?
+          AND title = ?
+        LIMIT 1
+        """,
+        (
+            project_id,
+            title
+        )
+    )
+
+    row = cursor.fetchone()
+    connection.close()
+
+    return dict(row) if row else None
+
+
+def update_knowledge_document(
+    document_id: int,
+    content: str,
+    content_hash: str,
+    created_at: str
+) -> None:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        UPDATE knowledge_documents
+        SET
+            content = ?,
+            content_hash = ?,
+            created_at = ?
+        WHERE id = ?
+        """,
+        (
+            content,
+            content_hash,
+            created_at,
+            document_id
+        )
+    )
+
+    connection.commit()
+    connection.close()
+
+
+def delete_knowledge_chunks(
+    document_id: int
+) -> None:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM knowledge_chunks
+        WHERE document_id = ?
+        """,
+        (document_id,)
+    )
+
+    connection.commit()
+    connection.close()
+
+def save_knowledge_chunk(
+    document_id: int,
+    chunk_index: int,
+    chunk_text: str,
+    embedding: list[float]
+) -> int:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO knowledge_chunks (
+            document_id,
+            chunk_index,
+            chunk_text,
+            embedding
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            document_id,
+            chunk_index,
+            chunk_text,
+            json.dumps(embedding)
+        )
+    )
+
+    chunk_id = cursor.lastrowid
+
+    connection.commit()
+    connection.close()
+
+    return chunk_id    
+
+def get_knowledge_chunks(
+    project_id: int
+) -> list[dict]:
+    connection = get_connection()
+    cursor = connection.cursor()
+
+    cursor.execute(
+        """
+        SELECT
+            kc.id,
+            kc.document_id,
+            kc.chunk_index,
+            kc.chunk_text,
+            kc.embedding,
+            kd.title AS document_title
+        FROM knowledge_chunks kc
+        INNER JOIN knowledge_documents kd
+            ON kd.id = kc.document_id
+        WHERE kd.project_id = ?
+        ORDER BY
+            kc.document_id,
+            kc.chunk_index
+        """,
+        (project_id,)
+    )
+
+    rows = cursor.fetchall()
+    connection.close()
+
+    chunks = []
+
+    for row in rows:
+        chunk = dict(row)
+
+        if chunk["embedding"]:
+            chunk["embedding"] = json.loads(
+                chunk["embedding"]
+            )
+
+        chunks.append(chunk)
+
+    return chunks

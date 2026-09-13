@@ -7,6 +7,13 @@ from uuid import uuid4
 from services.bedrock_text import generate_text
 from services.bedrock_image import generate_image
 
+from services.security import (
+    contains_prompt_injection,
+    contains_disallowed_content,
+    detect_pii,
+    contains_copyright_risk
+)
+
 from services.prompts import (
     build_prompt,
     build_image_prompt,
@@ -35,6 +42,7 @@ from services.database import (
     get_image_review_comments
 )
 
+from services.knowledge_service import sync_knowledge,  get_rag_context
 
 st.set_page_config(
     page_title="Generative AI con Amazon Bedrock",
@@ -63,6 +71,7 @@ if not projects:
 
 if "current_user_id" not in st.session_state:
     st.session_state["current_user_id"] = users[0]["id"]
+
 
 selected_user = st.selectbox(
     "Usuario activo",
@@ -97,6 +106,9 @@ selected_project = st.selectbox(
     ),
     format_func=lambda project: project["name"]
 )
+
+# Recuperamos conocimiento sobre el proyecto seleccionado
+sync_knowledge(selected_project["id"])    
 
 st.session_state["current_project_id"] = selected_project["id"]
 
@@ -278,11 +290,41 @@ if role == "writer":
                 height=200
             )
 
+            # deteción de información privada
+            pii_detected = detect_pii(text)
+
             if st.button("Crear contenido"):
                 if not new_title.strip():
                     st.warning("Introduce un título.")
+
                 elif not text.strip():
                     st.warning("Introduce un texto.")
+
+                elif contains_prompt_injection(text):
+                    st.warning(
+                        "El texto contiene instrucciones potencialmente manipulativas "
+                        "y no se guardará."
+                    )
+
+                elif contains_disallowed_content(text):
+                    st.warning(
+                        "El texto contiene contenido potencialmente inapropiado "
+                        "y no se guardará."
+                    )
+
+                elif pii_detected:
+                    st.warning(
+                        "Se han detectado posibles datos personales: "
+                        + ", ".join(pii_detected)
+                        + ". El contenido no se guardará."
+                    )
+
+                elif contains_copyright_risk(text):
+                    st.warning(
+                        "El texto contiene una solicitud de reproducción o imitación exacta "
+                        "y no se procesará."
+                    )                
+
                 else:
                     content_id = create_text_content(
                         project_id=selected_project["id"],
@@ -302,7 +344,6 @@ if role == "writer":
 
                     st.success("Contenido creado correctamente.")
                     st.rerun()
-
         # ----------------------------------------------------
         # Contenido existente
         # ----------------------------------------------------
@@ -367,12 +408,52 @@ if role == "writer":
                             "Enviar a revisión"
                         )
 
+                    # ------------------------------------------------
+                    # Procesar con Claude
+                    # ------------------------------------------------
                     if process:
+                        pii_detected = detect_pii(text)
+
                         if not text.strip():
                             st.warning("Introduce un texto.")
+
+                        elif contains_prompt_injection(text):
+                            st.warning(
+                                "El texto contiene instrucciones potencialmente manipulativas "
+                                "y no se procesará."
+                            )
+
+                        elif contains_disallowed_content(text):
+                            st.warning(
+                                "El texto contiene contenido potencialmente inapropiado "
+                                "y no se procesará."
+                            )
+
+                        elif pii_detected:
+                            st.warning(
+                                "Se han detectado posibles datos personales: "
+                                + ", ".join(pii_detected)
+                                + ". El contenido no se enviará al modelo."
+                            )
+
+                        elif contains_copyright_risk(text):
+                            st.warning(
+                                "El texto contiene una solicitud de reproducción o imitación exacta "
+                                "y no se procesará."
+                            )
+
                         else:
                             with st.spinner("Procesando con Claude..."):
-                                prompt = build_prompt(action, text)
+
+                                # recuperar top k del servicio de contenido    
+                                rag_context = get_rag_context(
+                                    project_id=selected_project["id"],
+                                    query=text,
+                                    top_k=3
+                                )
+
+                                prompt = build_prompt(action=action, text=text, rag_context=rag_context)
+                                
                                 config = TEXT_CONFIG[action]
 
                                 result = generate_text(
@@ -394,11 +475,43 @@ if role == "writer":
                             )
                             st.rerun()
 
+                    # ------------------------------------------------
+                    # Guardado manual
+                    # ------------------------------------------------
                     if save_manual:
+                        pii_detected = detect_pii(text)
+
                         if not text.strip():
                             st.warning("El texto no puede estar vacío.")
+
                         elif text == current_version["text"]:
                             st.info("No hay cambios que guardar.")
+
+                        elif contains_prompt_injection(text):
+                            st.warning(
+                                "El texto contiene instrucciones potencialmente manipulativas "
+                                "y no se guardará."
+                            )
+
+                        elif contains_disallowed_content(text):
+                            st.warning(
+                                "El texto contiene contenido potencialmente inapropiado "
+                                "y no se guardará."
+                            )
+
+                        elif pii_detected:
+                            st.warning(
+                                "Se han detectado posibles datos personales: "
+                                + ", ".join(pii_detected)
+                                + ". El contenido no se guardará."
+                            )
+
+                        elif contains_copyright_risk(text):
+                            st.warning(
+                                "El texto contiene una solicitud de reproducción o imitación exacta "
+                                "y no se guardará."
+                            )
+
                         else:
                             new_version = save_text_version(
                                 content_id=selected_content["id"],
@@ -413,7 +526,47 @@ if role == "writer":
                             )
                             st.rerun()
 
-                    if send_review:
+                # ------------------------------------------------
+                # Enviar a revisión
+                # ------------------------------------------------
+                if send_review:
+                    pii_detected = detect_pii(text)
+
+                    if not text.strip():
+                        st.warning("El texto no puede estar vacío.")
+
+                    elif text != current_version["text"]:
+                        st.warning(
+                            "Hay cambios sin guardar. Guarda primero una nueva versión "
+                            "antes de enviar a revisión."
+                        )
+
+                    elif contains_prompt_injection(text):
+                        st.warning(
+                            "El texto contiene instrucciones potencialmente manipulativas "
+                            "y no se enviará a revisión."
+                        )
+
+                    elif contains_disallowed_content(text):
+                        st.warning(
+                            "El texto contiene contenido potencialmente inapropiado "
+                            "y no se enviará a revisión."
+                        )
+
+                    elif pii_detected:
+                        st.warning(
+                            "Se han detectado posibles datos personales: "
+                            + ", ".join(pii_detected)
+                            + ". El contenido no se enviará a revisión."
+                        )
+
+                    elif contains_copyright_risk(text):
+                        st.warning(
+                            "El texto contiene una solicitud de reproducción o imitación exacta "
+                            "y no se enviará a revisión."
+                        )
+
+                    else:
                         update_text_content_status(
                             selected_content["id"],
                             "in_review"
@@ -421,7 +574,7 @@ if role == "writer":
 
                         st.success("Contenido enviado a revisión.")
                         st.rerun()
-
+                                
                 # -------------------------
                 # EN REVISIÓN
                 # -------------------------
@@ -540,11 +693,37 @@ elif role == "designer":
                 )
             )
 
+            pii_detected = detect_pii(image_prompt)
+
             if st.button("Crear propuesta y generar v1"):
                 if not image_title.strip():
                     st.warning("Introduce un título.")
+
                 elif not image_prompt.strip():
                     st.warning("Introduce una descripción.")
+
+                elif contains_disallowed_content(image_prompt):
+                    # Moderación:
+                    # Bloqueamos contenido inapropiado antes de llamar
+                    # al modelo de generación de imágenes.
+                    st.warning(
+                        "La descripción contiene contenido potencialmente inapropiado "
+                        "y no se generará la imagen."
+                    )
+
+                elif pii_detected:
+                    st.warning(
+                        "Se han detectado posibles datos personales: "
+                        + ", ".join(pii_detected)
+                        + ". La descripción no se enviará al modelo."
+                    )        
+
+                elif contains_copyright_risk(image_prompt):
+                    st.warning(
+                        "La descripción solicita una reproducción o imitación exacta "
+                        "y no se generará la imagen."
+                    )                                
+
                 else:
                     try:
                         with st.spinner(
@@ -562,7 +741,6 @@ elif role == "designer":
                                 seed=seed,
                                 negative_prompt=negative_prompt
                             )
-
                             generated_dir = Path("data/generated")
                             generated_dir.mkdir(
                                 parents=True,
@@ -743,14 +921,37 @@ elif role == "designer":
                             )
                         )
 
+
                     if generate_new_version:
+
+                        pii_detected = detect_pii(image_prompt)
+
                         if not image_prompt.strip():
                             st.warning("Introduce una descripción.")
+
+                        elif contains_disallowed_content(image_prompt):
+                            st.warning(
+                                "La descripción contiene contenido potencialmente inapropiado "
+                                "y no se generará la imagen."
+                            )
+
+                        elif pii_detected:
+                            st.warning(
+                                "Se han detectado posibles datos personales: "
+                                + ", ".join(pii_detected)
+                                + ". La descripción no se enviará al modelo."
+                            )
+
+                        elif contains_copyright_risk(image_prompt):
+                            st.warning(
+                                "La descripción solicita una reproducción o imitación exacta "
+                                "y no se generará la imagen."
+                            )
+
                         else:
                             try:
                                 with st.spinner(
-                                    "Generando nueva versión con "
-                                    "Stable Diffusion..."
+                                    "Generando nueva versión con Stable Diffusion..."
                                 ):
                                     final_prompt = build_image_prompt(
                                         image_prompt,
@@ -812,16 +1013,50 @@ elif role == "designer":
                                     st.error(str(error))
 
                     if send_image_review:
-                        update_image_content_status(
-                            selected_image_content["id"],
-                            "in_review"
-                        )
+                        pii_detected = detect_pii(image_prompt)
 
-                        st.success(
-                            "Propuesta visual enviada a revisión."
-                        )
-                        st.rerun()
+                        if not image_prompt.strip():
+                            st.warning("Introduce una descripción.")
 
+                        elif (
+                            image_prompt != current_version["prompt"]
+                            or style != current_version["style"]
+                            or int(seed) != int(current_version["seed"])
+                        ):
+                            st.warning(
+                                "Hay cambios sin guardar. Genera primero una nueva versión "
+                                "antes de enviar a revisión."
+                            )
+
+                        elif contains_disallowed_content(image_prompt):
+                            st.warning(
+                                "La descripción contiene contenido potencialmente inapropiado "
+                                "y no se enviará a revisión."
+                            )
+
+                        elif pii_detected:
+                            st.warning(
+                                "Se han detectado posibles datos personales: "
+                                + ", ".join(pii_detected)
+                                + ". La propuesta no se enviará a revisión."
+                            )
+
+                        elif contains_copyright_risk(image_prompt):
+                            st.warning(
+                                "La descripción solicita una reproducción o imitación exacta "
+                                "y no se enviará a revisión."
+                            )
+
+                        else:
+                            update_image_content_status(
+                                selected_image_content["id"],
+                                "in_review"
+                            )
+
+                            st.success(
+                                "Propuesta visual enviada a revisión."
+                            )
+                            st.rerun()
                 # -------------------------
                 # EN REVISIÓN
                 # -------------------------
