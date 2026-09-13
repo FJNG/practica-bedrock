@@ -10,14 +10,14 @@ initialize_database()
 
 create_user("Ana", "designer")
 create_user("Carlos", "writer")
-create_user("Laura", "approver")
+create_user("Fran", "approver")
 
 users = get_users()
 
 ana = next(user for user in users if user["name"] == "Ana")
 
 create_project(
-    "Campaña Primavera",
+    "Campaña Otoño",
     ana["id"]
 )
 
