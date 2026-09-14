@@ -264,3 +264,6 @@ Además, permite utilizar distintos modelos especializados dentro de una misma a
 
 ## ENLACE A VIDEO EXPLICATIVO YOUTUBE
 https://youtu.be/HKKby_IKGWo
+
+## URL REPOSITORIO
+https://github.com/FJNG/practica-bedrock
